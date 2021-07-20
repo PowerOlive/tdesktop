@@ -154,6 +154,8 @@ public:
 		not_null<Window::SessionController*> controller,
 		not_null<ListDelegate*> delegate);
 
+	static const crl::time kItemRevealDuration;
+
 	[[nodiscard]] Main::Session &session() const;
 	[[nodiscard]] not_null<Window::SessionController*> controller() const;
 	[[nodiscard]] not_null<ListDelegate*> delegate() const;
@@ -206,10 +208,13 @@ public:
 	bool tooltipWindowActive() const override;
 
 	[[nodiscard]] rpl::producer<FullMsgId> editMessageRequested() const;
-	void editMessageRequestNotify(FullMsgId item);
+	void editMessageRequestNotify(FullMsgId item) const;
+	[[nodiscard]] bool lastMessageEditRequestNotify() const;
 	[[nodiscard]] rpl::producer<FullMsgId> replyToMessageRequested() const;
 	void replyToMessageRequestNotify(FullMsgId item);
 	[[nodiscard]] rpl::producer<FullMsgId> readMessageRequested() const;
+	[[nodiscard]] rpl::producer<FullMsgId> showMessageRequested() const;
+	void replyNextMessage(FullMsgId fullId, bool next = true);
 
 	// ElementDelegate interface.
 	Context elementContext() override;
@@ -231,6 +236,14 @@ public:
 	void elementShowPollResults(
 		not_null<PollData*> poll,
 		FullMsgId context) override;
+	void elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context) override;
+	void elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView = false) override;
+	void elementCancelUpload(const FullMsgId &context) override;
 	void elementShowTooltip(
 		const TextWithEntities &text,
 		Fn<void()> hiddenCallback) override;
@@ -241,6 +254,8 @@ public:
 		const QString &command,
 		const FullMsgId &context) override;
 	void elementHandleViaClick(not_null<UserData*> bot) override;
+	bool elementIsChatWide() override;
+	not_null<Ui::PathShiftGradient*> elementPathShiftGradient() override;
 
 	~ListWidget();
 
@@ -283,7 +298,10 @@ private:
 		inline bool operator!=(const MouseState &other) const {
 			return !(*this == other);
 		}
-
+	};
+	struct ItemRevealAnimation {
+		Ui::Animations::Simple animation;
+		int startHeight = 0;
 	};
 	enum class Direction {
 		Up,
@@ -316,7 +334,7 @@ private:
 
 	void refreshViewer();
 	void updateAroundPositionFromNearest(int nearestIndex);
-	void refreshRows();
+	void refreshRows(const Data::MessagesSlice &old);
 	ScrollTopState countScrollState() const;
 	void saveScrollState();
 	void restoreScrollState();
@@ -445,8 +463,11 @@ private:
 	void checkUnreadBarCreation();
 	void applyUpdatedScrollState();
 	void scrollToAnimationCallback(FullMsgId attachToId, int relativeTo);
+	void startItemRevealAnimations();
+	void revealItemsCallback();
 
 	void updateHighlightedMessage();
+	void clearHighlightedMessage();
 
 	// This function finds all history items that are displayed and calls template method
 	// for each found message (in given direction) in the passed history with passed top offset.
@@ -472,8 +493,6 @@ private:
 	template <typename Method>
 	void enumerateDates(Method method);
 
-	ClickHandlerPtr hiddenUserpicLink(FullMsgId id);
-
 	static constexpr auto kMinimalIdsLimit = 24;
 
 	const not_null<ListDelegate*> _delegate;
@@ -493,10 +512,17 @@ private:
 	int _itemsWidth = 0;
 	int _itemsHeight = 0;
 	int _itemAverageHeight = 0;
+	base::flat_set<not_null<Element*>> _itemRevealPending;
+	base::flat_map<
+		not_null<Element*>,
+		ItemRevealAnimation> _itemRevealAnimations;
+	int _itemsRevealHeight = 0;
 	base::flat_set<FullMsgId> _animatedStickersPlayed;
 	base::flat_map<
 		not_null<PeerData*>,
 		std::shared_ptr<Data::CloudImageView>> _userpics, _userpicsCache;
+
+	const std::unique_ptr<Ui::PathShiftGradient> _pathGradient;
 
 	int _minHeight = 0;
 	int _visibleTop = 0;
@@ -544,6 +570,8 @@ private:
 	bool _wasSelectedText = false;
 	Qt::CursorShape _cursor = style::cur_default;
 
+	bool _isChatWide = false;
+
 	base::unique_qptr<Ui::PopupMenu> _menu;
 
 	QPoint _trippleClickPoint;
@@ -556,6 +584,7 @@ private:
 	rpl::event_stream<FullMsgId> _requestedToEditMessage;
 	rpl::event_stream<FullMsgId> _requestedToReplyToMessage;
 	rpl::event_stream<FullMsgId> _requestedToReadMessage;
+	rpl::event_stream<FullMsgId> _requestedToShowMessage;
 
 	rpl::lifetime _viewerLifetime;
 

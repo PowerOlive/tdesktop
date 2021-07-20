@@ -13,15 +13,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace Platform {
 namespace Notifications {
 
-bool SkipAudio() {
+bool SkipAudioForCustom() {
 	return false;
 }
 
-bool SkipToast() {
+bool SkipToastForCustom() {
 	return false;
 }
 
-bool SkipFlashBounce() {
+bool SkipFlashBounceForCustom() {
 	return false;
 }
 
@@ -33,6 +33,10 @@ bool Enforced() {
 	// Wayland doesn't support positioning
 	// and custom notifications don't work here
 	return IsWayland();
+}
+
+bool ByDefault() {
+	return false;
 }
 
 void Create(Window::Notifications::System *system) {

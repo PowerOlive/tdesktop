@@ -7,7 +7,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_replies_list.h"
 
-#include "base/unixtime.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "history/history_service.h"
@@ -45,7 +44,6 @@ struct RepliesList::Viewer {
 	int limitAfter = 0;
 	int injectedForRoot = 0;
 	base::has_weak_ptr guard;
-	bool stale = true;
 	bool scheduled = false;
 };
 
@@ -66,23 +64,6 @@ rpl::producer<MessagesSlice> RepliesList::source(
 		MessagePosition aroundId,
 		int limitBefore,
 		int limitAfter) {
-	return rpl::combine(
-		sourceFromServer(aroundId, limitBefore, limitAfter),
-		_history->session().changes().historyFlagsValue(
-			_history,
-			Data::HistoryUpdate::Flag::LocalMessages)
-	) | rpl::filter([=](const MessagesSlice &data, const auto &) {
-		return (data.fullCount.value_or(0) >= 0);
-	}) | rpl::map([=](MessagesSlice &&server, const auto &) {
-		appendLocalMessages(server);
-		return std::move(server);
-	});
-}
-
-rpl::producer<MessagesSlice> RepliesList::sourceFromServer(
-		MessagePosition aroundId,
-		int limitBefore,
-		int limitAfter) {
 	const auto around = aroundId.fullId.msg;
 	return [=](auto consumer) {
 		auto lifetime = rpl::lifetime();
@@ -90,15 +71,11 @@ rpl::producer<MessagesSlice> RepliesList::sourceFromServer(
 		const auto push = [=] {
 			viewer->scheduled = false;
 			if (buildFromData(viewer)) {
-				viewer->stale = false;
+				appendLocalMessages(viewer->slice);
 				consumer.put_next_copy(viewer->slice);
 			}
 		};
 		const auto pushDelayed = [=] {
-			if (!viewer->stale) {
-				viewer->stale = true;
-				consumer.put_next_copy(MessagesSlice{ .fullCount = -1 });
-			}
 			if (!viewer->scheduled) {
 				viewer->scheduled = true;
 				crl::on_main(&viewer->guard, push);
@@ -115,6 +92,11 @@ rpl::producer<MessagesSlice> RepliesList::sourceFromServer(
 		) | rpl::filter([=](const MessageUpdate &update) {
 			return applyUpdate(viewer, update);
 		}) | rpl::start_with_next(pushDelayed, lifetime);
+
+		_history->session().changes().historyUpdates(
+			_history,
+			Data::HistoryUpdate::Flag::LocalMessages
+		) | rpl::start_with_next(pushDelayed, lifetime);
 
 		_partLoaded.events(
 		) | rpl::start_with_next(pushDelayed, lifetime);
@@ -205,7 +187,7 @@ void RepliesList::injectRootMessage(not_null<Viewer*> viewer) {
 	injectRootDivider(root, slice);
 
 	if (const auto group = _history->owner().groups().find(root)) {
-		for (const auto item : ranges::view::reverse(group->items)) {
+		for (const auto item : ranges::views::reverse(group->items)) {
 			slice->ids.push_back(item->fullId());
 		}
 		viewer->injectedForRoot = group->items.size();
@@ -413,7 +395,7 @@ void RepliesList::loadAround(MsgId id) {
 					_skippedBefore = 0;
 				}
 			}
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			_beforeId = 0;
 			_loadingAround = std::nullopt;
 			finish();
@@ -461,7 +443,7 @@ void RepliesList::loadBefore() {
 					_fullCount = _list.size();
 				}
 			}
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			_beforeId = 0;
 			finish();
 		}).send();
@@ -505,7 +487,7 @@ void RepliesList::loadAfter() {
 					_fullCount = _list.size();
 				}
 			}
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			_afterId = 0;
 			finish();
 		}).send();
@@ -625,24 +607,6 @@ bool RepliesList::processMessagesIsEmpty(const MTPmessages_Messages &result) {
 
 	Ensures(list.size() >= skipped);
 	return (list.size() == skipped);
-}
-
-HistoryItem *RepliesList::lastEditableMessage() {
-	const auto message = [&](MsgId msgId) {
-		return _history->owner().message(_history->channelId(), msgId);
-	};
-
-	const auto now = base::unixtime::now();
-	auto proj = [&](MsgId msgId) {
-		if (const auto item = message(msgId)) {
-			return item->allowsEdit(now);
-		}
-		return false;
-	};
-	const auto it = ranges::find_if(_list, std::move(proj));
-	return (it == end(_list))
-		? nullptr
-		: _history->owner().groups().findItemToEdit(message(*it)).get();
 }
 
 } // namespace Data

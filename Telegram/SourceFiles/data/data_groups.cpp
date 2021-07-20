@@ -21,7 +21,7 @@ constexpr auto kMaxItemsInGroup = 10;
 Groups::Groups(not_null<Session*> data) : _data(data) {
 }
 
-bool Groups::isGrouped(not_null<HistoryItem*> item) const {
+bool Groups::isGrouped(not_null<const HistoryItem*> item) const {
 	if (!item->groupId()) {
 		return false;
 	}
@@ -65,8 +65,8 @@ void Groups::unregisterMessage(not_null<const HistoryItem*> item) {
 }
 
 void Groups::refreshMessage(
-	not_null<HistoryItem*> item,
-	bool justRefreshViews) {
+		not_null<HistoryItem*> item,
+		bool justRefreshViews) {
 	if (!isGrouped(item)) {
 		unregisterMessage(item);
 		return;
@@ -124,7 +124,7 @@ HistoryItemsList::const_iterator Groups::findPositionForItem(
 	return last;
 }
 
-const Group *Groups::find(not_null<HistoryItem*> item) const {
+const Group *Groups::find(not_null<const HistoryItem*> item) const {
 	const auto groupId = item->groupId();
 	if (!groupId) {
 		return nullptr;

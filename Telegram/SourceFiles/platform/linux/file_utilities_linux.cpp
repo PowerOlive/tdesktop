@@ -10,13 +10,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "platform/linux/linux_gtk_integration.h"
 #include "platform/linux/specific_linux.h"
 
+#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+#include "platform/linux/linux_xdp_file_dialog.h"
+#include "platform/linux/linux_xdp_open_with_dialog.h"
+#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+
+#include <QtCore/QProcess>
 #include <QtGui/QDesktopServices>
 
-extern "C" {
-#undef signals
-#include <gio/gio.h>
-#define signals public
-} // extern "C"
+#include <glibmm.h>
+#include <giomm.h>
 
 using Platform::internal::GtkIntegration;
 
@@ -24,12 +27,19 @@ namespace Platform {
 namespace File {
 
 void UnsafeOpenUrl(const QString &url) {
-	if (!g_app_info_launch_default_for_uri(
-		url.toUtf8(),
-		nullptr,
-		nullptr)) {
-		QDesktopServices::openUrl(url);
+	try {
+		if (Gio::AppInfo::launch_default_for_uri(url.toStdString())) {
+			return;
+		}
+	} catch (const Glib::Error &e) {
+		LOG(("App Error: %1").arg(QString::fromStdString(e.what())));
 	}
+
+	if (QDesktopServices::openUrl(url)) {
+		return;
+	}
+
+	QProcess::startDetached(qsl("xdg-open"), { url });
 }
 
 void UnsafeOpenEmailLink(const QString &email) {
@@ -37,29 +47,43 @@ void UnsafeOpenEmailLink(const QString &email) {
 }
 
 bool UnsafeShowOpenWith(const QString &filepath) {
+#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+	if (internal::ShowXDPOpenWithDialog(filepath)) {
+		return true;
+	}
+#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+
 	if (InFlatpak() || InSnap()) {
 		return false;
 	}
 
 	if (const auto integration = GtkIntegration::Instance()) {
-		const auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-		return integration->showOpenWithDialog(absolutePath);
+		return integration->showOpenWithDialog(filepath);
 	}
 
 	return false;
 }
 
 void UnsafeLaunch(const QString &filepath) {
-	const auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-
-	if (!g_app_info_launch_default_for_uri(
-		g_filename_to_uri(absolutePath.toUtf8(), nullptr, nullptr),
-		nullptr,
-		nullptr)) {
-		if (!UnsafeShowOpenWith(filepath)) {
-			QDesktopServices::openUrl(QUrl::fromLocalFile(filepath));
+	try {
+		if (Gio::AppInfo::launch_default_for_uri(
+			Glib::filename_to_uri(filepath.toStdString()))) {
+			return;
 		}
+	} catch (const Glib::Error &e) {
+		LOG(("App Error: %1").arg(QString::fromStdString(e.what())));
 	}
+
+	if (UnsafeShowOpenWith(filepath)) {
+		return;
+	}
+
+	const auto qUrlPath = QUrl::fromLocalFile(filepath);
+	if (QDesktopServices::openUrl(qUrlPath)) {
+		return;
+	}
+
+	QProcess::startDetached(qsl("xdg-open"), { qUrlPath.toEncoded() });
 }
 
 } // namespace File
@@ -77,19 +101,22 @@ bool Get(
 	if (parent) {
 		parent = parent->window();
 	}
-	if (const auto integration = GtkIntegration::Instance()) {
-		if (integration->fileDialogSupported()
-			&& integration->useFileDialog(type)) {
-			return integration->getFileDialog(
-				parent,
-				files,
-				remoteContent,
-				caption,
-				filter,
-				type,
-				startFile);
+#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+	{
+		const auto result = XDP::Get(
+			parent,
+			files,
+			remoteContent,
+			caption,
+			filter,
+			type,
+			startFile);
+
+		if (result.has_value()) {
+			return *result;
 		}
 	}
+#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
 	return ::FileDialog::internal::GetDefault(
 		parent,
 		files,

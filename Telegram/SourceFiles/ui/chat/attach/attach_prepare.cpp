@@ -7,6 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/chat/attach/attach_prepare.h"
 
+#include "ui/rp_widget.h"
+#include "ui/widgets/popup_menu.h"
+
 #include "ui/chat/attach/attach_send_files_way.h"
 #include "ui/image/image_prepare.h"
 #include "ui/ui_utility.h"
@@ -111,7 +114,7 @@ bool PreparedList::canBeSentInSlowmodeWith(const PreparedList &other) const {
 	}
 
 	using Type = PreparedFile::Type;
-	auto &&all = ranges::view::concat(files, other.files);
+	auto &&all = ranges::views::concat(files, other.files);
 	const auto has = [&](Type type) {
 		return ranges::contains(all, type, &PreparedFile::type);
 	};
@@ -151,25 +154,6 @@ bool PreparedList::canAddCaption(bool sendingAlbum) const {
 		return !isSticker;
 	} else if (!sendingAlbum) {
 		return false;
-	}
-
-	// All music.
-	{
-		auto pred = [](const PreparedFile &file) {
-			return file.type == PreparedFile::Type::Music;
-		};
-		if (ranges::all_of(files, std::move(pred))) {
-			return true;
-		}
-	}
-	// All files.
-	{
-		auto pred = [](const PreparedFile &file) {
-			return file.type == PreparedFile::Type::File;
-		};
-		if (ranges::all_of(files, std::move(pred))) {
-			return true;
-		}
 	}
 	const auto hasFiles = ranges::contains(
 		files,

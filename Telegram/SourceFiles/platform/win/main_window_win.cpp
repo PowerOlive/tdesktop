@@ -15,35 +15,37 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/notifications_manager.h"
 #include "mainwindow.h"
 #include "base/crc32hash.h"
+#include "base/platform/win/base_windows_wrl.h"
 #include "core/application.h"
 #include "lang/lang_keys.h"
 #include "storage/localstorage.h"
 #include "ui/widgets/popup_menu.h"
+#include "ui/ui_utility.h"
 #include "window/themes/window_theme.h"
 #include "history/history.h"
-#include "app.h"
 
 #include <QtWidgets/QDesktopWidget>
 #include <QtWidgets/QStyleFactory>
 #include <QtWidgets/QApplication>
 #include <QtGui/QWindow>
+#include <QtGui/QScreen>
 #include <qpa/qplatformnativeinterface.h>
 
 #include <Shobjidl.h>
 #include <shellapi.h>
 #include <WtsApi32.h>
 
-#include <roapi.h>
-#include <wrl/client.h>
+#include <windows.ui.viewmanagement.h>
+#include <UIViewSettingsInterop.h>
 
 #include <Windowsx.h>
 #include <VersionHelpers.h>
 
 HICON qt_pixmapToWinHICON(const QPixmap &);
 
-using namespace Microsoft::WRL;
-
 Q_DECLARE_METATYPE(QMargins);
+
+namespace ViewManagement = ABI::Windows::UI::ViewManagement;
 
 namespace Platform {
 namespace {
@@ -54,6 +56,8 @@ namespace {
 // if the application was deactivated less than 0.5s ago, then the tray
 // icon click (both left or right button) was made from the active app.
 constexpr auto kKeepActiveForTrayIcon = crl::time(500);
+
+using namespace Microsoft::WRL;
 
 HICON createHIconFromQIcon(const QIcon &icon, int xSize, int ySize) {
 	if (!icon.isNull()) {
@@ -99,27 +103,31 @@ HWND createTaskbarHider() {
 }
 
 ComPtr<ITaskbarList3> taskbarList;
-
 bool handleSessionNotification = false;
+uint32 kTaskbarCreatedMsgId = 0;
 
 } // namespace
 
-UINT MainWindow::_taskbarCreatedMsgId = 0;
+struct MainWindow::Private {
+	ComPtr<ViewManagement::IUIViewSettings> viewSettings;
+};
 
 MainWindow::MainWindow(not_null<Window::Controller*> controller)
 : Window::MainWindow(controller)
+, _private(std::make_unique<Private>())
 , ps_tbHider_hWnd(createTaskbarHider()) {
 	QCoreApplication::instance()->installNativeEventFilter(
 		EventFilter::CreateInstance(this));
 
-	if (!_taskbarCreatedMsgId) {
-		_taskbarCreatedMsgId = RegisterWindowMessage(L"TaskbarButtonCreated");
+	if (!kTaskbarCreatedMsgId) {
+		kTaskbarCreatedMsgId = RegisterWindowMessage(L"TaskbarButtonCreated");
 	}
-	subscribe(Window::Theme::Background(), [this](const Window::Theme::BackgroundUpdate &update) {
-		if (_shadow && update.paletteChanged()) {
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		if (_shadow) {
 			_shadow->setColor(st::windowShadowFg->c);
 		}
-	});
+	}, lifetime());
 	setupNativeWindowFrame();
 
 	using namespace rpl::mappers;
@@ -138,8 +146,7 @@ void MainWindow::setupNativeWindowFrame() {
 	);
 
 	using BackgroundUpdate = Window::Theme::BackgroundUpdate;
-	auto paletteChanges = base::ObservableViewer(
-		*Window::Theme::Background()
+	auto themeChanges = Window::Theme::Background()->updates(
 	) | rpl::filter([=](const BackgroundUpdate &update) {
 		return update.type == BackgroundUpdate::Type::ApplyingTheme;
 	}) | rpl::to_empty;
@@ -147,7 +154,7 @@ void MainWindow::setupNativeWindowFrame() {
 	auto nightMode = rpl::single(
 		rpl::empty_value()
 	) | rpl::then(
-		std::move(paletteChanges)
+		std::move(themeChanges)
 	) | rpl::map([=] {
 		return Window::Theme::IsNightMode();
 	}) | rpl::distinct_until_changed();
@@ -166,6 +173,10 @@ void MainWindow::setupNativeWindowFrame() {
 			fixMaximizedWindow();
 		}
 	}, lifetime());
+}
+
+uint32 MainWindow::TaskbarCreatedMsgId() {
+	return kTaskbarCreatedMsgId;
 }
 
 void MainWindow::TaskbarCreated() {
@@ -217,6 +228,7 @@ void MainWindow::psRefreshTaskbarIcon() {
 	palette.setColor(QPalette::Window, (isActiveWindow() ? st::titleBgActive : st::titleBg)->c);
 	refresher->setPalette(palette);
 	refresher->show();
+	refresher->raise();
 	refresher->activateWindow();
 
 	updateIconCounters();
@@ -229,14 +241,14 @@ void MainWindow::psSetupTrayIcon() {
 	if (!trayIcon) {
 		trayIcon = new QSystemTrayIcon(this);
 
-		auto icon = QIcon(App::pixmapFromImageInPlace(Core::App().logoNoMargin()));
+		auto icon = QIcon(Ui::PixmapFromImage(Core::App().logoNoMargin()));
 
 		trayIcon->setIcon(icon);
 		connect(
 			trayIcon,
 			&QSystemTrayIcon::messageClicked,
 			this,
-			[=] { App::wnd()->showFromTray(); });
+			[=] { showFromTray(); });
 		attachToTrayIcon(trayIcon);
 	}
 	updateIconCounters();
@@ -256,9 +268,11 @@ void MainWindow::showTrayTooltip() {
 	}
 }
 
-void MainWindow::workmodeUpdated(DBIWorkMode mode) {
+void MainWindow::workmodeUpdated(Core::Settings::WorkMode mode) {
+	using WorkMode = Core::Settings::WorkMode;
+
 	switch (mode) {
-	case dbiwmWindowAndTray: {
+	case WorkMode::WindowAndTray: {
 		psSetupTrayIcon();
 		HWND psOwner = (HWND)GetWindowLongPtr(ps_hWnd, GWLP_HWNDPARENT);
 		if (psOwner) {
@@ -267,7 +281,7 @@ void MainWindow::workmodeUpdated(DBIWorkMode mode) {
 		}
 	} break;
 
-	case dbiwmTrayOnly: {
+	case WorkMode::TrayOnly: {
 		psSetupTrayIcon();
 		HWND psOwner = (HWND)GetWindowLongPtr(ps_hWnd, GWLP_HWNDPARENT);
 		if (!psOwner) {
@@ -275,7 +289,7 @@ void MainWindow::workmodeUpdated(DBIWorkMode mode) {
 		}
 	} break;
 
-	case dbiwmWindowOnly: {
+	case WorkMode::WindowOnly: {
 		if (trayIcon) {
 			trayIcon->setContextMenu(0);
 			trayIcon->deleteLater();
@@ -289,6 +303,47 @@ void MainWindow::workmodeUpdated(DBIWorkMode mode) {
 		}
 	} break;
 	}
+}
+
+bool MainWindow::hasTabletView() const {
+	if (!_private->viewSettings) {
+		return false;
+	}
+	auto mode = ViewManagement::UserInteractionMode();
+	_private->viewSettings->get_UserInteractionMode(&mode);
+	return (mode == ViewManagement::UserInteractionMode_Touch);
+}
+
+bool MainWindow::initSizeFromSystem() {
+	if (!hasTabletView()) {
+		return false;
+	}
+	const auto screen = [&] {
+		if (const auto result = windowHandle()->screen()) {
+			return result;
+		}
+		return QGuiApplication::primaryScreen();
+	}();
+	if (!screen) {
+		return false;
+	}
+	setGeometry(screen->availableGeometry());
+	return true;
+}
+
+QRect MainWindow::computeDesktopRect() const {
+	const auto flags = MONITOR_DEFAULTTONEAREST;
+	if (const auto monitor = MonitorFromWindow(psHwnd(), flags)) {
+		MONITORINFOEX info;
+		info.cbSize = sizeof(info);
+		GetMonitorInfo(monitor, &info);
+		return QRect(
+			info.rcWork.left,
+			info.rcWork.top,
+			info.rcWork.right - info.rcWork.left,
+			info.rcWork.bottom - info.rcWork.top);
+	}
+	return Window::MainWindow::computeDesktopRect();
 }
 
 void MainWindow::updateWindowIcon() {
@@ -314,13 +369,17 @@ void MainWindow::updateIconCounters() {
 
 	auto &bg = (muted ? st::trayCounterBgMute : st::trayCounterBg);
 	auto &fg = st::trayCounterFg;
-	auto iconSmallPixmap16 = App::pixmapFromImageInPlace(iconWithCounter(16, counter, bg, fg, true));
-	auto iconSmallPixmap32 = App::pixmapFromImageInPlace(iconWithCounter(32, counter, bg, fg, true));
+	auto iconSmallPixmap16 = Ui::PixmapFromImage(
+		iconWithCounter(16, counter, bg, fg, true));
+	auto iconSmallPixmap32 = Ui::PixmapFromImage(
+		iconWithCounter(32, counter, bg, fg, true));
 	QIcon iconSmall, iconBig;
 	iconSmall.addPixmap(iconSmallPixmap16);
 	iconSmall.addPixmap(iconSmallPixmap32);
-	iconBig.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(32, taskbarList.Get() ? 0 : counter, bg, fg, false)));
-	iconBig.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(64, taskbarList.Get() ? 0 : counter, bg, fg, false)));
+	iconBig.addPixmap(Ui::PixmapFromImage(
+		iconWithCounter(32, taskbarList.Get() ? 0 : counter, bg, fg, false)));
+	iconBig.addPixmap(Ui::PixmapFromImage(
+		iconWithCounter(64, taskbarList.Get() ? 0 : counter, bg, fg, false)));
 	if (trayIcon) {
 		// Force Qt to use right icon size, not the larger one.
 		QIcon forTrayIcon;
@@ -336,8 +395,10 @@ void MainWindow::updateIconCounters() {
 	if (taskbarList.Get()) {
 		if (counter > 0) {
 			QIcon iconOverlay;
-			iconOverlay.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(-16, counter, bg, fg, false)));
-			iconOverlay.addPixmap(App::pixmapFromImageInPlace(iconWithCounter(-32, counter, bg, fg, false)));
+			iconOverlay.addPixmap(Ui::PixmapFromImage(
+				iconWithCounter(-16, counter, bg, fg, false)));
+			iconOverlay.addPixmap(Ui::PixmapFromImage(
+				iconWithCounter(-32, counter, bg, fg, false)));
 			ps_iconOverlay = createHIconFromQIcon(iconOverlay, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
 		}
 		auto description = (counter > 0) ? tr::lng_unread_bar(tr::now, lt_count, counter) : QString();
@@ -360,6 +421,20 @@ void MainWindow::initHook() {
 		&& (Dlls::WTSUnRegisterSessionNotification != nullptr);
 	if (handleSessionNotification) {
 		Dlls::WTSRegisterSessionNotification(ps_hWnd, NOTIFY_FOR_THIS_SESSION);
+	}
+
+	using namespace base::Platform;
+	auto factory = ComPtr<IUIViewSettingsInterop>();
+	if (SupportsWRL()) {
+		GetActivationFactory(
+			StringReferenceWrapper(
+				RuntimeClass_Windows_UI_ViewManagement_UIViewSettings).Get(),
+			&factory);
+		if (factory) {
+			factory->GetForWindow(
+				ps_hWnd,
+				IID_PPV_ARGS(&_private->viewSettings));
+		}
 	}
 
 	psInitSysMenu();
@@ -662,6 +737,7 @@ MainWindow::~MainWindow() {
 	if (handleSessionNotification) {
 		Dlls::WTSUnRegisterSessionNotification(ps_hWnd);
 	}
+	_private->viewSettings.Reset();
 	if (taskbarList) {
 		taskbarList.Reset();
 	}

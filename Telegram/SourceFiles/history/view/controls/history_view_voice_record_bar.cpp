@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "api/api_send_progress.h"
 #include "base/event_filter.h"
+#include "base/openssl_help.h"
 #include "base/unixtime.h"
 #include "boxes/confirm_box.h"
 #include "core/application.h"
@@ -42,8 +43,6 @@ using SendActionUpdate = VoiceRecordBar::SendActionUpdate;
 using VoiceToSend = VoiceRecordBar::VoiceToSend;
 
 constexpr auto kAudioVoiceUpdateView = crl::time(200);
-constexpr auto kLockDelay = crl::time(100);
-constexpr auto kRecordingUpdateDelta = crl::time(100);
 constexpr auto kAudioVoiceMaxLength = 100 * 60; // 100 minutes
 constexpr auto kMaxSamples =
 	::Media::Player::kDefaultFrequency * kAudioVoiceMaxLength;
@@ -99,13 +98,13 @@ enum class FilterType {
 [[nodiscard]] not_null<DocumentData*> DummyDocument(
 		not_null<Data::Session*> owner) {
 	return owner->document(
-		rand_value<DocumentId>(),
+		openssl::RandomValue<DocumentId>(),
 		uint64(0),
 		QByteArray(),
 		base::unixtime::now(),
 		QVector<MTPDocumentAttribute>(),
 		QString(),
-		QByteArray(),
+		InlineImageLocation(),
 		ImageWithLocation(),
 		ImageWithLocation(),
 		owner->session().mainDcId(),
@@ -1601,7 +1600,7 @@ void VoiceRecordBar::installListenStateFilter() {
 				_listen->playPause();
 				return Result::Cancel;
 			}
-			if (isEnter) {
+			if (isEnter && !_warningShown) {
 				requestToSendWithOptions({});
 				return Result::Cancel;
 			}
@@ -1632,17 +1631,19 @@ void VoiceRecordBar::showDiscardBox(
 			hideAnimated();
 		}
 		close();
+		_warningShown = false;
 		if (callback) {
 			callback();
 		}
 	};
-	Ui::show(Box<ConfirmBox>(
+	_controller->show(Box<ConfirmBox>(
 		(isListenState()
 			? tr::lng_record_listen_cancel_sure
 			: tr::lng_record_lock_cancel_sure)(tr::now),
 		tr::lng_record_lock_discard(tr::now),
 		st::attentionBoxButton,
 		std::move(sure)));
+	_warningShown = true;
 }
 
 } // namespace HistoryView::Controls
